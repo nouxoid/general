@@ -2,6 +2,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using System;
 using System.Collections.ObjectModel;
 using Windows.ApplicationModel.DataTransfer;
@@ -11,11 +13,99 @@ using System.Linq;
 
 namespace general.Views
 {
+    // Converter for BoolToVisibility
+    public class BoolToVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, string language)
+        {
+            return (value is bool boolValue && boolValue) ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, string language)
+        {
+            return (value is Visibility visibility) && visibility == Visibility.Visible;
+        }
+    }
+
+    // Converter for favorite button background
+    public class FavoriteButtonBackgroundConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, string language)
+        {
+            return (value is bool isFavorite && isFavorite) 
+                ? new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(255, 255, 185, 0)) // Gold background
+                : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, string language)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    // Converter for favorite button foreground
+    public class FavoriteButtonForegroundConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, string language)
+        {
+            return (value is bool isFavorite && isFavorite) 
+                ? new SolidColorBrush(Microsoft.UI.Colors.White)
+                : new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(255, 102, 102, 102)); // Gray
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, string language)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
     public class ClipboardItem
     {
         public string Content { get; set; } = string.Empty;
         public DateTime Timestamp { get; set; }
         public bool IsFavorite { get; set; }
+        
+        // Enhanced properties for better UI display
+        public string DisplayContent => Content.Length > 80 ? Content.Substring(0, 80) + "..." : Content;
+        public string TimeAgo
+        {
+            get
+            {
+                var timeSpan = DateTime.Now - Timestamp;
+                return timeSpan.TotalMinutes < 1 ? "Just now" :
+                       timeSpan.TotalMinutes < 60 ? $"{(int)timeSpan.TotalMinutes}m ago" :
+                       timeSpan.TotalHours < 24 ? $"{(int)timeSpan.TotalHours}h ago" :
+                       timeSpan.TotalDays < 7 ? $"{(int)timeSpan.TotalDays}d ago" :
+                       Timestamp.ToString("MMM dd");
+            }
+        }
+        public string ContentType
+        {
+            get
+            {
+                if (Content.StartsWith("http://") || Content.StartsWith("https://"))
+                    return "URL";
+                if (Content.Contains("@") && Content.Contains(".") && Content.Count(c => c == '@') == 1)
+                    return "Email";
+                if (Content.All(char.IsDigit) && Content.Length > 5)
+                    return "Number";
+                return "Text";
+            }
+        }
+        public string ContentIcon
+        {
+            get
+            {
+                return ContentType switch
+                {
+                    "URL" => "\uE71B",     // Globe icon
+                    "Email" => "\uE715",   // Mail icon
+                    "Number" => "\uE7C3",  // Calculator icon
+                    _ => "\uE8C8"          // Text icon
+                };
+            }
+        }
+        
         public override string ToString() => Content;
     }
 
@@ -26,89 +116,187 @@ namespace general.Views
         private static readonly string HistoryFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipboardManagerHistory.json");
 
         private ObservableCollection<ClipboardItem> _history = new();
+        private ObservableCollection<ClipboardItem> _filteredHistory = new();
         private ClipboardItem? _selectedItem = null;
+        private bool _showingFavoritesOnly = false;
 
         public MainPage()
         {
             this.InitializeComponent();
-            ClipboardListView.ItemsSource = _history;
+            ClipboardListView.ItemsSource = _filteredHistory;
             LoadHistory();
             Clipboard.ContentChanged += Clipboard_ContentChanged;
             BuildTopBar();
-            BuildActionBar();
+            UpdateView();
         }
 
         private void BuildTopBar()
         {
             TopBar.Children.Clear();
-            var clearIcon = new FontIcon { Glyph = "\uE74D", FontSize = 20 };
-            var clearButton = new Button
-            {
-                Content = clearIcon,
-                CornerRadius = new CornerRadius(6),
-                Margin = new Thickness(0, 0, 4, 0)
-            };
-            ToolTipService.SetToolTip(clearButton, "Clear History");
-            clearButton.Click += (s, e) => { _history.Clear(); SaveHistory(); };
+            
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
+            // App title - minimal
+            var titleText = new TextBlock
+            {
+                Text = "Clipboard",
+                FontSize = 20,
+                FontWeight = Microsoft.UI.Text.FontWeights.Medium,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(255, 51, 51, 51)),
+                Margin = new Thickness(0, 0, 16, 0)
+            };
+            
+            // Status indicator - minimal
+            var statusText = new TextBlock
+            {
+                Text = GetStatusText(),
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(255, 153, 153, 153)),
+                Margin = new Thickness(0, 0, 16, 0)
+            };
+
+            // Spacer
+            var spacer = new Border { HorizontalAlignment = HorizontalAlignment.Stretch };
+            
+            // Minimal action buttons
+            var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            
             var settingsButton = new Button
             {
-                Content = new FontIcon { Glyph = "\uE713", FontSize = 20 },
-                CornerRadius = new CornerRadius(6),
-                Margin = new Thickness(0, 0, 4, 0)
+                Content = new FontIcon { Glyph = "\uE713", FontSize = 16 },
+                Width = 32,
+                Height = 32,
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                BorderThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(4)
             };
             ToolTipService.SetToolTip(settingsButton, "Settings");
+            settingsButton.Click += OnSettingsClicked;
 
-            var infoButton = new Button
+            var clearButton = new Button
             {
-                Content = new FontIcon { Glyph = "\uE946", FontSize = 20 },
-                CornerRadius = new CornerRadius(6)
+                Content = new FontIcon { Glyph = "\uE74D", FontSize = 16 },
+                Width = 32,
+                Height = 32,
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                BorderThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(4)
             };
-            ToolTipService.SetToolTip(infoButton, "About");
+            ToolTipService.SetToolTip(clearButton, "Clear All");
+            clearButton.Click += (s, e) => { 
+                _history.Clear(); 
+                SaveHistory(); 
+                UpdateView(); 
+            };
 
-            TopBar.Children.Add(clearButton);
-            TopBar.Children.Add(settingsButton);
-            TopBar.Children.Add(infoButton);
+            buttonPanel.Children.Add(settingsButton);
+            buttonPanel.Children.Add(clearButton);
+
+            Grid.SetColumn(titleText, 0);
+            Grid.SetColumn(statusText, 1);
+            Grid.SetColumn(spacer, 2);
+            Grid.SetColumn(buttonPanel, 3);
+
+            grid.Children.Add(titleText);
+            grid.Children.Add(statusText);
+            grid.Children.Add(spacer);
+            grid.Children.Add(buttonPanel);
+            
+            TopBar.Children.Add(grid);
         }
 
-        private void BuildActionBar()
+        private string GetStatusText()
         {
-            ActionBar.Children.Clear();
-            var favBtn = new Button { Content = new FontIcon { Glyph = "\uE734", FontSize = 18 }, CornerRadius = new CornerRadius(6) };
-            ToolTipService.SetToolTip(favBtn, "Favorite");
-            favBtn.Click += (s, e) => { if (_selectedItem != null) { _selectedItem.IsFavorite = !_selectedItem.IsFavorite; SaveHistory(); } };
-            var pinBtn = new Button { Content = new FontIcon { Glyph = "\uE718", FontSize = 18 }, CornerRadius = new CornerRadius(6) };
-            ToolTipService.SetToolTip(pinBtn, "Pin");
-            // Pin logic placeholder
-            var delBtn = new Button { Content = new FontIcon { Glyph = "\uE74D", FontSize = 18 }, CornerRadius = new CornerRadius(6) };
-            ToolTipService.SetToolTip(delBtn, "Delete");
-            delBtn.Click += (s, e) => { if (_selectedItem != null) { _history.Remove(_selectedItem); _selectedItem = null; ActionBar.Visibility = Visibility.Collapsed; SaveHistory(); } };
-            var editBtn = new Button { Content = new FontIcon { Glyph = "\uE70F", FontSize = 18 }, CornerRadius = new CornerRadius(6) };
-            ToolTipService.SetToolTip(editBtn, "Edit");
-            // Edit logic placeholder
-            ActionBar.Children.Add(favBtn);
-            ActionBar.Children.Add(pinBtn);
-            ActionBar.Children.Add(delBtn);
-            ActionBar.Children.Add(editBtn);
+            var totalItems = _history.Count;
+            var favoriteItems = _history.Count(item => item.IsFavorite);
+            
+            if (_showingFavoritesOnly && favoriteItems > 0)
+                return $"{favoriteItems} favorites";
+            else if (totalItems == 0)
+                return "Empty";
+            else if (favoriteItems > 0)
+                return $"{totalItems} items · {favoriteItems} favorites";
+            else
+                return $"{totalItems} items";
+        }
+
+        private void UpdateView()
+        {
+            // Update filtered view
+            _filteredHistory.Clear();
+            var itemsToShow = _showingFavoritesOnly 
+                ? _history.Where(item => item.IsFavorite) 
+                : _history;
+            
+            var query = SearchBox?.Text ?? "";
+            if (!string.IsNullOrWhiteSpace(query))
+            {
+                itemsToShow = itemsToShow.Where(item => item.Content.Contains(query, StringComparison.OrdinalIgnoreCase));
+            }
+
+            foreach (var item in itemsToShow)
+            {
+                _filteredHistory.Add(item);
+            }
+
+            // Update UI state
+            var hasItems = _filteredHistory.Count > 0;
+            EmptyState.Visibility = hasItems ? Visibility.Collapsed : Visibility.Visible;
+            ClipboardListView.Visibility = hasItems ? Visibility.Visible : Visibility.Collapsed;
+            
+            // Update status
+            UpdateStatusText();
+        }
+
+        private void UpdateStatusText()
+        {
+            if (TopBar.Children.FirstOrDefault() is Grid grid && 
+                grid.Children.Count > 1 && 
+                grid.Children[1] is TextBlock statusText)
+            {
+                statusText.Text = GetStatusText();
+            }
+        }
+
+        private void OnSettingsClicked(object sender, RoutedEventArgs e)
+        {
+            ((Popup)this.FindName("SettingsPopup")).IsOpen = !((Popup)this.FindName("SettingsPopup")).IsOpen;
+        }
+
+        private void OnShowFavoritesClicked(object sender, RoutedEventArgs e)
+        {
+            _showingFavoritesOnly = !_showingFavoritesOnly;
+            var button = sender as Button;
+            if (button != null)
+            {
+                button.Content = _showingFavoritesOnly ? "Show all items" : "Show only favorites";
+            }
+            UpdateView();
+            ((Popup)this.FindName("SettingsPopup")).IsOpen = false;
+        }
+
+        private void OnClearAllClicked(object sender, RoutedEventArgs e)
+        {
+            _history.Clear();
+            SaveHistory();
+            UpdateView();
+            ((Popup)this.FindName("SettingsPopup")).IsOpen = false;
         }
 
         private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
         {
-            var query = SearchBox.Text;
-            if (string.IsNullOrWhiteSpace(query))
-            {
-                ClipboardListView.ItemsSource = _history;
-            }
-            else
-            {
-                ClipboardListView.ItemsSource = new ObservableCollection<ClipboardItem>(_history.Where(item => item.Content.Contains(query, StringComparison.OrdinalIgnoreCase)));
-            }
+            UpdateView();
         }
 
         private void OnListViewSelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             _selectedItem = ClipboardListView.SelectedItem as ClipboardItem;
-            ActionBar.Visibility = _selectedItem != null ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void OnCopyClicked(object sender, RoutedEventArgs e)
@@ -121,13 +309,23 @@ namespace general.Views
             }
         }
 
-        private void OnPasteClicked(object sender, RoutedEventArgs e)
+        private void OnToggleFavoriteClicked(object sender, RoutedEventArgs e)
         {
             if (((FrameworkElement)sender).DataContext is ClipboardItem item)
             {
-                var data = new DataPackage();
-                data.SetText(item.Content);
-                Clipboard.SetContent(data);
+                item.IsFavorite = !item.IsFavorite;
+                SaveHistory();
+                UpdateView(); // Refresh to update visual state
+            }
+        }
+
+        private void OnDeleteClicked(object sender, RoutedEventArgs e)
+        {
+            if (((FrameworkElement)sender).DataContext is ClipboardItem item)
+            {
+                _history.Remove(item);
+                SaveHistory();
+                UpdateView();
             }
         }
 
@@ -136,7 +334,7 @@ namespace general.Views
             var cutoff = DateTime.Now - MaxHistoryAge;
             for (int i = _history.Count - 1; i >= 0; i--)
             {
-                if (_history[i].Timestamp < cutoff)
+                if (_history[i].Timestamp < cutoff && !_history[i].IsFavorite) // Keep favorites even if old
                     _history.RemoveAt(i);
             }
             while (_history.Count > MaxHistoryCount)
@@ -159,6 +357,7 @@ namespace general.Views
                     });
                     PruneHistory();
                     SaveHistory();
+                    UpdateView();
                 }
             }
         }
